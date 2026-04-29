@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/restic/restic/pkg/resticlib"
@@ -41,6 +43,10 @@ func main() {
 		if err := runTests(); err != nil {
 			log.Fatalf("Tests failed: %v", err)
 		}
+	case "browse":
+		if err := exampleBrowse(os.Args[2:]); err != nil {
+			log.Fatalf("Browse failed: %v", err)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -55,6 +61,10 @@ func printUsage() {
 	fmt.Println("  backup   - Create a backup")
 	fmt.Println("  restore  - Restore from backup")
 	fmt.Println("  list     - List snapshots")
+	fmt.Println("  browse   - Browse snapshot contents")
+	fmt.Println("            Without arguments: lists all snapshots")
+	fmt.Println("            With <snapshot-id>:<path>: lists files at that path")
+	fmt.Println("            --depth <num>: limit directory recursion depth (default: 1)")
 	fmt.Println("  test     - Run comprehensive tests")
 	fmt.Println()
 	fmt.Println("Environment variables:")
@@ -189,7 +199,129 @@ func exampleRestore() error {
 	return nil
 }
 
-// exampleList lists all snapshots
+// exampleBrowse browses snapshot contents.
+// Without arguments it lists all snapshots.
+// With <snapshot-id>:<path> it lists files at that path.
+// --depth <num> controls recursion depth (default 1; 0 = unlimited).
+func exampleBrowse(args []string) error {
+	// Parse --depth flag from args.
+	depth := 1
+	remaining := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--depth" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("--depth requires a numeric argument")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil {
+				return fmt.Errorf("invalid --depth value %q: %w", args[i], err)
+			}
+			depth = n
+		} else {
+			remaining = append(remaining, args[i])
+		}
+	}
+
+	cfg := getConfig()
+	ctx := context.Background()
+
+	client, err := resticlib.NewClient(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+	defer client.Close()
+
+	// No positional argument: list snapshots.
+	if len(remaining) == 0 {
+		snapshots, err := client.ListSnapshots(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list snapshots: %w", err)
+		}
+		if len(snapshots) == 0 {
+			fmt.Println("No snapshots found")
+			return nil
+		}
+		fmt.Printf("Found %d snapshot(s):\n\n", len(snapshots))
+		for i, snap := range snapshots {
+			snapID := "unknown"
+			if snap.ID() != nil {
+				snapID = snap.ID().Str()
+			}
+			fmt.Printf("%d. Snapshot %s\n", i+1, snapID)
+			fmt.Printf("   Time: %s\n", snap.Time.Format(time.RFC3339))
+			fmt.Printf("   Hostname: %s\n", snap.Hostname)
+			fmt.Printf("   Paths: %v\n", snap.Paths)
+			if len(snap.Tags) > 0 {
+				fmt.Printf("   Tags: %v\n", snap.Tags)
+			}
+			fmt.Println()
+		}
+		return nil
+	}
+
+	// Positional argument: <snapshot-id>:<path>
+	arg := remaining[0]
+	colonIdx := strings.Index(arg, ":")
+	var snapshotID, browsePath string
+	if colonIdx < 0 {
+		snapshotID = arg
+		browsePath = "/"
+	} else {
+		snapshotID = arg[:colonIdx]
+		browsePath = arg[colonIdx+1:]
+		if browsePath == "" {
+			browsePath = "/"
+		}
+	}
+
+	fmt.Printf("Browsing snapshot %s at %s (depth=%d)...\n\n", snapshotID, browsePath, depth)
+
+	entries, err := client.BrowseSnapshot(ctx, resticlib.BrowseOptions{
+		SnapshotID: snapshotID,
+		Path:       browsePath,
+		Depth:      depth,
+	})
+	if err != nil {
+		return fmt.Errorf("browse failed: %w", err)
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("(empty)")
+		return nil
+	}
+
+	// Paths in entries are absolute. Strip the browsePath prefix so that
+	// depth is visually anchored to the given path, not the filesystem root.
+	pathPrefix := strings.TrimRight(browsePath, "/")
+
+	for _, e := range entries {
+		typeChar := '-'
+		if e.Type == "dir" {
+			typeChar = 'd'
+		} else if e.Type == "symlink" {
+			typeChar = 'l'
+		}
+
+		// Show paths relative to the starting path.
+		displayPath := e.Path
+		if pathPrefix != "" && strings.HasPrefix(e.Path, pathPrefix+"/") {
+			displayPath = e.Path[len(pathPrefix)+1:]
+		}
+
+		fmt.Printf("%c %s  %8d  %s  %s\n",
+			typeChar,
+			e.Mode,
+			e.Size,
+			e.ModTime.Format("2006-01-02 15:04:05"),
+			displayPath,
+		)
+	}
+
+	return nil
+}
+
+
 func exampleList() error {
 	fmt.Println("Listing snapshots...")
 

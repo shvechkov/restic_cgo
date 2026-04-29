@@ -8,6 +8,7 @@ A Go library that exposes the major functions of restic for programmatic backup 
 - **S3/Wasabi Support**: Full support for S3-compatible storage backends
 - **Repository Management**: Initialize, check, and manage restic repositories
 - **Snapshot Operations**: Create, list, and restore snapshots
+- **Repository Browsing**: Explore snapshot contents without restoring (see [README_BROWSE_REP.md](README_BROWSE_REP.md))
 - **Comprehensive Testing**: Includes full test suite and examples
 
 ## Installation
@@ -95,6 +96,25 @@ for _, snap := range snapshots {
 }
 ```
 
+### Browse Snapshot Contents
+
+```go
+entries, err := client.BrowseSnapshot(ctx, resticlib.BrowseOptions{
+    SnapshotID: "a623f3ea",          // short/full ID or "latest"
+    Path:       "/home/alice/docs",  // path inside the snapshot
+    Depth:      2,                   // levels below Path; 0 = unlimited
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, e := range entries {
+    log.Printf("%s  %s  %d bytes", e.Type, e.Path, e.Size)
+}
+```
+
+See [README_BROWSE_REP.md](README_BROWSE_REP.md) for a full guide with examples.
+
 ## Configuration
 
 The `Config` struct supports the following fields:
@@ -162,6 +182,24 @@ Restores data from a snapshot.
 
 Returns all snapshots in the repository.
 
+#### `(*Client) BrowseSnapshot(ctx context.Context, opts BrowseOptions) ([]FileEntry, error)`
+
+Lists files and directories inside a snapshot at a given path.
+
+**BrowseOptions:**
+- `SnapshotID string` - Snapshot ID to browse (short prefix, full ID, or `"latest"`)
+- `Path string` - Absolute path inside the snapshot to start from (default: `"/"`)
+- `Depth int` - Recursion depth below `Path`; `0` means unlimited
+
+**FileEntry fields:**
+- `Path string` - Absolute path inside the snapshot
+- `Type string` - `"file"`, `"dir"`, or `"symlink"`
+- `Size uint64` - File size in bytes
+- `ModTime time.Time` - Last modification time
+- `Mode os.FileMode` - Unix permission bits
+
+See [README_BROWSE_REP.md](README_BROWSE_REP.md) for a complete usage guide.
+
 #### `(*Client) Forget(ctx context.Context, opts ForgetOptions) error`
 
 Removes a snapshot from the repository.
@@ -201,6 +239,18 @@ go build -o resticlib-example
 
 # List snapshots
 ./resticlib-example list
+
+# Browse snapshot contents (list all snapshots)
+./resticlib-example browse
+
+# Browse root of a specific snapshot
+./resticlib-example browse <snapshot-id>:/
+
+# Browse a sub-directory (depth relative to that path)
+./resticlib-example browse <snapshot-id>:/home/alice/documents --depth 2
+
+# Browse a path recursively (unlimited depth)
+./resticlib-example browse <snapshot-id>:/etc --depth 0
 
 # Restore latest snapshot
 ./resticlib-example restore /path/to/restore

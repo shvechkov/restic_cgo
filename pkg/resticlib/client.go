@@ -373,6 +373,124 @@ func (c *Client) findLatestSnapshot(ctx context.Context) (restic.ID, error) {
 	return latestID, nil
 }
 
+// FileEntry represents a file or directory found when browsing a snapshot.
+type FileEntry struct {
+	Path    string
+	Type    string
+	Size    uint64
+	ModTime time.Time
+	Mode    os.FileMode
+}
+
+// BrowseOptions holds options for browsing a snapshot.
+type BrowseOptions struct {
+	// SnapshotID is the full or short snapshot ID to browse.
+	SnapshotID string
+	// Path is the path inside the snapshot to list (default: "/").
+	Path string
+	// Depth controls how many directory levels to recurse (0 = unlimited).
+	Depth int
+}
+
+// BrowseSnapshot returns the list of files/directories at the given path inside
+// a snapshot. If Depth is 0, the listing is unlimited; otherwise it recurses
+// up to Depth levels.
+func (c *Client) BrowseSnapshot(ctx context.Context, opts BrowseOptions) ([]FileEntry, error) {
+	if opts.SnapshotID == "" {
+		return nil, fmt.Errorf("snapshot ID is required")
+	}
+	if opts.Path == "" {
+		opts.Path = "/"
+	}
+
+	// Index must be loaded to resolve blob locations.
+	if err := c.repo.LoadIndex(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load index: %w", err)
+	}
+
+	snapshotID, err := c.resolveSnapshotID(ctx, opts.SnapshotID)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot, err := data.LoadSnapshot(ctx, c.repo, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load snapshot: %w", err)
+	}
+
+	if snapshot.Tree == nil {
+		return nil, fmt.Errorf("snapshot has no tree")
+	}
+
+	// Navigate to the requested directory.
+	treeID, err := data.FindTreeDirectory(ctx, c.repo, snapshot.Tree, opts.Path)
+	if err != nil {
+		return nil, fmt.Errorf("path %q not found in snapshot: %w", opts.Path, err)
+	}
+
+	var entries []FileEntry
+	err = c.collectEntries(ctx, treeID, opts.Path, 1, opts.Depth, &entries)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// collectEntries recursively collects file entries up to maxDepth levels.
+// currentDepth starts at 1; maxDepth==0 means unlimited.
+func (c *Client) collectEntries(ctx context.Context, treeID *restic.ID, basePath string, currentDepth, maxDepth int, entries *[]FileEntry) error {
+	iter, err := data.LoadTree(ctx, c.repo, *treeID)
+	if err != nil {
+		return fmt.Errorf("failed to load tree: %w", err)
+	}
+
+	for nodeOrErr := range iter {
+		if nodeOrErr.Error != nil {
+			return nodeOrErr.Error
+		}
+		node := nodeOrErr.Node
+		fullPath := strings.TrimRight(basePath, "/") + "/" + node.Name
+
+		entry := FileEntry{
+			Path:    fullPath,
+			Type:    string(node.Type),
+			Size:    node.Size,
+			ModTime: node.ModTime,
+			Mode:    node.Mode,
+		}
+		*entries = append(*entries, entry)
+
+		if node.Type == data.NodeTypeDir && node.Subtree != nil {
+			if maxDepth == 0 || currentDepth < maxDepth {
+				if err := c.collectEntries(ctx, node.Subtree, fullPath, currentDepth+1, maxDepth, entries); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// resolveSnapshotID resolves a full or short snapshot ID string to a restic.ID.
+func (c *Client) resolveSnapshotID(ctx context.Context, id string) (restic.ID, error) {
+	if strings.ToLower(id) == "latest" {
+		return c.findLatestSnapshot(ctx)
+	}
+
+	// Try exact parse first.
+	parsed, err := restic.ParseID(id)
+	if err == nil {
+		return parsed, nil
+	}
+
+	// Fall back to prefix search.
+	found, err := restic.Find(ctx, c.repo, restic.SnapshotFile, id)
+	if err != nil {
+		return restic.ID{}, fmt.Errorf("failed to find snapshot %q: %w", id, err)
+	}
+	return found, nil
+}
+
 // ForgetOptions holds options for forget operations
 type ForgetOptions struct {
 	SnapshotID string
